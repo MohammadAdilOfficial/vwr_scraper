@@ -1,0 +1,121 @@
+from playwright.sync_api import sync_playwright
+import pandas as pd
+import requests
+import os
+import time
+
+# Settings
+SDS_FOLDER = "VWR_PDFs"
+OUTPUT_FILE = "vwr_final_report1.xlsx"
+INPUT_FILE = "chemical_list.xlsx"
+os.makedirs(SDS_FOLDER, exist_ok=True)
+
+def run_full_scraper():
+    if not os.path.exists(INPUT_FILE):
+        print(f"Error: {INPUT_FILE} file nahi mili!")
+        return
+        
+    df_input = pd.read_excel(INPUT_FILE)
+    chemical_names = df_input["Chemical Name"].tolist()
+    
+    all_data = []
+    seen_catalogs = set()
+    
+    with sync_playwright() as p:
+        # Server ke liye optimized browser launch settings
+        browser = p.chromium.launch(
+            headless=True, 
+            args=["--disable-dev-shm-usage", "--no-sandbox", "--disable-gpu"]
+        )
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        page = context.new_page()
+        
+        try:
+            for name in chemical_names:
+                print(f"\n--- Searching for: {name} ---")
+                search_url = f"https://www.vwr.com/us/en/search/{name.replace(' ', '%20')}"
+                
+                try:
+                    # networkidle ki jagah domcontentloaded taake script na atke
+                    page.goto(search_url, wait_until="domcontentloaded", timeout=90000)
+                except Exception as e:
+                    print(f"Page load error: {e}")
+                    continue
+                
+                page_count = 1
+                while True:
+                    print(f"Processing Page {page_count} for {name}...")
+                    
+                    products = page.locator("app-avtr-product-list-item").all()
+                    
+                    for product in products:
+                        try:
+                            # Element load hone ka wait karein
+                            product.locator("h2").first.wait_for(state="attached", timeout=15000)
+                            
+                            name_text = product.locator("h2").first.inner_text().strip()
+                            manufacturer = product.locator("p.cx-product-summary").first.inner_text().replace("Supplier:", "").strip()
+                            
+                            # Expand button click
+                            header = product.locator("h6.accordion-heading")
+                            if header.count() > 0:
+                                header.click(force=True)
+                            
+                            rows = product.locator("div.line-border").all()
+                            for row in rows:
+                                cat_num_el = row.locator("a.cx-action-link.font-bold")
+                                if cat_num_el.count() == 0: continue
+                                
+                                cat_num = cat_num_el.inner_text().strip()
+                                if cat_num in seen_catalogs: continue
+                                
+                                sds_link_el = row.get_by_role("link", name="SDS")
+                                sds_url = sds_link_el.get_attribute("href") if sds_link_el.count() > 0 else "N/A"
+                                
+                                # Download logic
+                                status = "No SDS"
+                                local_path = "N/A"
+                                if sds_url != "N/A":
+                                    full_sds_url = "https://www.vwr.com" + sds_url if sds_url.startswith("/") else sds_url
+                                    try:
+                                        resp = requests.get(full_sds_url, timeout=20)
+                                        if resp.status_code == 200:
+                                            filename = f"{cat_num.replace('/', '_')}.pdf"
+                                            local_path = os.path.join(SDS_FOLDER, filename)
+                                            with open(local_path, 'wb') as f:
+                                                f.write(resp.content)
+                                            status = "Download Successfully"
+                                    except: status = "Download Failed"
+
+                                all_data.append({
+                                    "Chemical Name": name_text,
+                                    "Manufacturer": manufacturer,
+                                    "Catalog Number": cat_num,
+                                    "Source URL": sds_url,
+                                    "Local Save Path": local_path,
+                                    "Status": status
+                                })
+                                seen_catalogs.add(cat_num)
+                        except Exception as e:
+                            print(f"Skipping product due to error: {e}")
+                    
+                    # Next Page
+                    next_button = page.locator("a.next")
+                    if next_button.count() > 0 and "disabled" not in next_button.get_attribute("class"):
+                        next_button.scroll_into_view_if_needed()
+                        next_button.click(force=True)
+                        page.wait_for_load_state("domcontentloaded")
+                        page_count += 1
+                        time.sleep(3) # Delay barha diya taake server handle kar sake
+                    else:
+                        break
+        
+        finally:
+            if all_data:
+                pd.DataFrame(all_data).to_excel(OUTPUT_FILE, index=False)
+            browser.close()
+
+if __name__ == "__main__":
+    run_full_scraper()
