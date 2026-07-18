@@ -1,0 +1,25 @@
+# Environments and credentials
+.env
+.env.*
+*.env
+
+# Downloaded files and folders
+Final_Folder2/
+*.pdf
+proxy_test_download.pdf
+webshare_test.pdf
+test_download.pdf
+
+# Excel Reports
+
+
+# Python caches and local virtual environments
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+env/
+
+# OS specific files
+.DS_Store
+Thumbs.db
